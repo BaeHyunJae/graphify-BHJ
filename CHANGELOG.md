@@ -2,6 +2,70 @@
 
 Full release notes with details on each version: [GitHub Releases](https://github.com/Graphify-Labs/graphify/releases)
 
+## 0.9.73 (2026-09-30)
+
+- Feature: enum members are now extracted as nodes with `case_of` edges in four more languages — **Rust** enum variants (#3938), **Zig** enum members (#3940), **C++** `enum`/`enum class` enumerators including nested enums (#3939), and **Scala 3** enum cases plus their methods (#3937) — all thanks @rajatnagda45.
+- Fix: Java calls to inherited methods and `super.method()` now resolve to the declaring ancestor (walking the `inherits` chain, nearest declaration wins), instead of dangling; an unknown/external or ambiguous ancestor fails closed (#3932, thanks @janwaleed09).
+- Fix: semantic extraction warns once when a file exceeds the 20,000-character cap and is truncated, instead of silently dropping the tail (#3923, #3773, thanks @AK-Lmn).
+- Feature: Solidity file-level free functions (Solidity 0.7+, declared outside any contract) and their calls are now extracted (#3906, thanks @rajatnagda45).
+- Fix: VB.NET type/module-qualified calls (`MyModule.DoThing()`, `MyClass.SharedMethod()`) resolve to the target method; value-receiver and `MyBase.` calls fail closed (#3909, thanks @rajatnagda45).
+- Fix: Astro files are parsed correctly — only the frontmatter and `<script>` blocks are fed to the AST pass (the HTML template no longer produces parse errors), with line numbers preserved (#3902, thanks @Bosken85).
+- Fix: the "surprising connections" cross-repo/directory bonus now matches the reason it prints — two files at the scan root no longer falsely score as crossing repos (#3934, thanks @neo1777).
+- Fix: under `--exclude-hubs`, a node whose only neighbours are excluded hubs is kept with its hub's community instead of being severed into a singleton; the default path is unchanged (#3933, thanks @neo1777).
+- Perf: the Neo4j/FalkorDB `--push` path creates a per-label id index before the node upsert loop, fixing the throughput collapse on large graphs (#3957, thanks @Yi-111-a).
+- Fix: community labeling keeps the labels it already named when a nested retry fails to parse, instead of discarding the whole batch (#3956, thanks @Vikram-Lex).
+- Fix: `graphify hook status` reports hooks written by an older release as out of date (run `graphify hook install` to refresh) (#3951, #3771, thanks @bercedev).
+- Fix: a Rust virtual-workspace-root `Cargo.toml` (only `[workspace]`, no `[package]`) is treated as skipped-by-design rather than warned as zero-node (#3930, #3910, thanks @Adityakk9031).
+- Fix: when the instructions file (`CLAUDE.md` etc.) is a symlink, install reports the real target it wrote to, and uninstall keeps the symlink (strips only the graphify section) instead of deleting the link (#3950, #3953, #3805, thanks @bercedev).
+
+## 0.9.72 (2026-09-29)
+
+- Feature: after a package upgrade, `graphify` refreshes stale installed skills automatically (the `SKILL.md` + references sidecar it manages) so the version-mismatch warning no longer requires a manual `graphify install`. It runs on any non-install CLI command when a skill is stale, backs up local edits to `SKILL.md.bak`, never touches your marker-bounded `CLAUDE.md`/`AGENTS.md`/`GEMINI.md` sections, and can be disabled with `GRAPHIFY_NO_AUTO_REFRESH=1` (#3895, #1805, thanks @bercedev).
+- Fix: `graph.html`'s Node Info panel now shows the real Type/Source/Community for each node instead of "Type: unknown / Source: -" (the panel read field names that did not match the emitted node schema); aggregated community nodes show a member count (#3918, #3914, thanks @hopstreax).
+- Fix: a Kotlin class property that is both annotated and has an inferred type (`@Volatile var x = 0`) no longer crashes extraction with an `UnboundLocalError` that dropped the whole file (#3915, thanks @nothariharan; #3899, thanks @harshaygadekar; #3884).
+- Fix: SQL DDL that appears before a PostgreSQL `DO $$ ... $$` block is now extracted — the block node the parser produces for that span is walked instead of skipped (#3900, thanks @bercedev).
+- Fix: Razor extracts C# members from `@functions { }` blocks (classic Razor Pages/MVC), not only Blazor `@code { }` blocks (#3908, thanks @rajatnagda45).
+- Feature: Blade templates now link a view to the layout it `@extends` (#3907, thanks @rajatnagda45).
+- Fix: resolving an imported module name no longer binds to a same-named contained symbol (a class/module member); only genuine top-level module/file nodes are considered (#3898, #3887, thanks @harshaygadekar).
+- Fix: `docx` sidecar conversion now keeps tables in their document position (instead of dumping them after all prose) and reads all text, including tracked insertions, content controls, and text boxes, by walking the document body in order (#3833, thanks @L4XB).
+- Fix: label/signature sidecars are now published atomically and in a safe order (labels before signatures), so an interrupted rebuild can no longer leave stale community labels for a clustering that no longer exists (#3853, thanks @shashank-100).
+- Fix: the markdown wikilink index respects `.graphifyignore`/`.gitignore`/`--exclude` and resolves an article-named `index` without overwriting the generated `index.md` hub — two independent wiki/markdown fixes (#3818, thanks @breken-ai; escaped-alias parsing `[[target\|alias]]` #3772, thanks @zagushka).
+- Fix: the community listing in `GRAPH_REPORT.md` reuses the shared real-node filter, so `rationale`/`concept` nodes no longer inflate a community's node count or leak into the listing (#3836, #3794, thanks @ayushcodes10).
+- Fix: extraction now warns once (not per file) when a PDF is encountered but the `pdf` extra (`pypdf`) is not installed, instead of silently producing no text (#3710, #3702, thanks @shobhitagnihotri69).
+- Chore: `graphify` / `graphify --help` now shows the logo banner and a link to the hosted platform at app.graphify.com.
+
+## 0.9.71 (2026-09-28)
+
+- Feature: SQL `CREATE TRIGGER` statements are now extracted and linked to their table (`ON <table>`), including `OR REPLACE`/`OR ALTER`, `INSTEAD OF`, and procedural `BEGIN…END` bodies that previously landed in a parser-error node and were dropped (#3863, thanks @rajatnagda45).
+- Feature: Groovy `enum` declarations and their constants are extracted, with members linked to the enum via `case_of` (#3861, thanks @rajatnagda45).
+- Fix: R class definitions created via a namespace-qualified constructor (`R6::R6Class`, `methods::setRefClass`) are now recognised, so the class body and its methods are no longer dropped (#3864, thanks @rajatnagda45).
+- Fix: R6 intra-class calls through `self$method()` and `private$method()` now resolve to the sibling method instead of dangling; `super$` is left unresolved (single-file dispatch is not visible) (#3865, thanks @rajatnagda45).
+- Fix: the markdown wikilink index now respects `.graphifyignore`/`.gitignore`/`--exclude` — it no longer descends huge ignored trees when building the `[[link]]` index, and a wikilink can no longer resolve into an ignored file (#3826, #3822, thanks @Abhirup0).
+- Fix: manifest re-anchoring keeps a foreign-platform key in its own path syntax (a POSIX key on Windows, a `C:\`/UNC key on POSIX) using `posixpath`/`ntpath` rather than the host's rules, fixing separator corruption introduced by the 0.9.69 portability work (#3879, thanks @Dakshcore).
+- Fix: normalizing a Twitter/X URL for the oEmbed fetch rewrites only the host, so `x.com`/`twitter.com` appearing in the path or query is no longer corrupted (#3880, thanks @Dakshcore).
+- Chore: `graphify install` shows the refreshed graphify logo banner (#3892, thanks @rajarshidattapy).
+
+## 0.9.70 (2026-09-27)
+
+- Security: the Fortran capital-F cpp step no longer allows an untrusted `.F`/`.F90` source to read arbitrary host files. `-nostdinc -I /dev/null` did not stop cpp from resolving absolute (`#include "/etc/passwd"`) or traversing (`#include "../../../secret"`) includes, which inlined host-file contents into `graph.json`/`GRAPH_REPORT.md` and the LLM context on the default offline path. Every `#include` directive is now stripped before preprocessing and the source is fed to cpp on stdin; macro expansion is preserved (GHSA-pcc4-rvhr-2pr8, CWE-22/73/200).
+- Security: the Aider/Devin monolith `--watch` snippet no longer interpolates the agent-substituted `INPUT_PATH` into a shell command — it now reads the trusted `graphify-out/.graphify_root` written in Step 1, closing the last instance of the shell-injection class from #3642 (#3852, #3844, thanks @hopstreax).
+- Security: Terraform secret redaction now also covers a `value` paired with a secret-named `name` in name/value pair lists (`environment = [{ name = "DB_PASSWORD", value = "…" }]`, ECS `valueFrom` included), where the sensitive signal is the sibling `name` literal rather than a key (#3870, #3787, thanks @breken-ai).
+- Fix: `graphify watch` now serializes concurrent rebuilds on Windows via `msvcrt` byte-range locking instead of a no-op lock, closing a WinError 32 race between overlapping rebuilds; the POSIX `fcntl` path is unchanged (#3883, #3881, thanks @harshaygadekar).
+- Fix: C# type references no longer collect a named tuple's element *names* as type references (`(int Count, string Name)` recorded a bogus ref to `Count`/`Name`); only the element types are referenced (#3877, #3796, thanks @KaiyiQuan).
+- Feature: JSX component usage now produces `calls` edges — `<MyButton/>` and `<_Row/>` link to the component, while lowercase DOM tags (`<div>`) and member tags (`<Nav.Item>`) are conservatively skipped, so React component graphs capture render relationships (#3855, #3854, thanks @sinangumuskabak-sys).
+- Fix: absolute Python imports that spell the scan root's own nested namespace (`from Company.Apps.Team.lib import x` when the scan root is `Team/`) now resolve to the local module by projecting the namespace prefix onto the scan-root layout (#3867, #3843, thanks @nikhilsaxena04).
+
+## 0.9.69 (2026-09-26)
+
+- Feature: five language extractors gained structural depth — **OCaml** classes now emit their methods (via the `method` relation) and instance variables (#3838, thanks @rajatnagda45); **Elixir** `defprotocol`/`defimpl` are extracted as containers holding their functions, with a same-file `implements` link (#3839, thanks @rajatnagda45); **Fortran** derived-type `contains` blocks link type-bound procedures to the type, resolving the `=> impl` target (#3840, thanks @rajatnagda45); **Julia** macro definitions and `@enum` types are extracted, including valued (`red = 1`) and typed (`Color::UInt8`) enum forms, with members using the `case_of` relation (#3841, thanks @rajatnagda45); **Kotlin** annotations (class/function/property, use-site targets) and `val`/`var` primary-constructor properties now produce edges (#3848, #3842, thanks @nikhilsaxena04).
+- Fix: a TypeScript "solution" `tsconfig.json` that only carries `references` (no `paths` of its own) now resolves path aliases declared in the referenced project configs, so alias imports in a `tsc -b` layout no longer dangle (#3753, #3745, thanks @abhay-codes07).
+- Fix: extraction now skips the process pool up front when the `spawn` start method can't re-import `__main__` (stdin, `python -c`, REPL, embedded callers), falling back to a correct sequential run instead of a wall of `BrokenProcessPool` tracebacks (#3754, #3669, thanks @abhay-codes07).
+- Fix: entity deduplication preserves a genuine pre-existing self-loop (a recursive call, a self-referential FK) while still dropping a self-loop newly created by a merge (#3825, thanks @Abhirup0).
+- Fix: `ingest` classifies a URL by its parsed host, not by text anywhere in the URL, so `example.com/article-about-youtube` is no longer mistaken for a YouTube link; subdomains and `youtu.be` still match, path-based extension detection is unchanged (#3831, thanks @L4XB).
+- Fix: `graphify update` on a destination outside the scan root no longer leaks a stat-index cache into the corpus — the incremental detection path now forwards `cache_root` like the fresh-scan path (#3850, #3847, thanks @ayushcodes10).
+- Fix: manifest duplicate-key collapse breaks ties by last-seen time instead of arbitrary iteration order, so a stale duplicate can no longer win and under-report changed files; also re-anchors foreign-platform absolute keys and normalizes `..`/`.` segments so more duplicates actually collapse (#3781, #1964, thanks @ayushcodes10).
+- Docs: a community-health and contributor-guide overhaul — new `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, and `RELEASING.md`, refreshed issue/PR templates, and corrected factual drift in `SECURITY.md` (supported version, network/XSS boundaries), `ARCHITECTURE.md` (shared-state), and `AGENTS.md` (scoped-query workflow) (#3845, thanks @nikhilsaxena04).
+
 ## 0.9.68 (2026-09-25)
 
 - Security: the `/graphify add ... --watch` reference no longer passes the raw, agent-substituted `INPUT_PATH` placeholder unquoted into a shell command (`… -m graphify.watch INPUT_PATH`), where a scan root containing `$(…)`, backticks, or `;` could execute — a follow-on to the Step 1 fix. The watcher now reads the trusted `graphify-out/.graphify_root` that Step 1 resolves, so there is no path to substitute (#3742, #3642, thanks @ayushcodes10). The identical placeholder still appears in the Aider/Devin monolith `--watch` snippet and is tracked separately.

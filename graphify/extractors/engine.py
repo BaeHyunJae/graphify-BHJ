@@ -16,6 +16,9 @@ def _csharp_namespace_id(dotted_name: str) -> str:
     digest = hashlib.sha1(dotted_name.encode("utf-8")).hexdigest()[:16]
     return f"csharp_namespace:{digest}"
 
+# JSX tags that render a component (the closing tag repeats the name; not counted).
+_JSX_ELEMENT_TYPES = frozenset({"jsx_opening_element", "jsx_self_closing_element"})
+
 REFERENCE_CONTEXTS = frozenset({
     "field", "parameter_type", "return_type", "generic_arg", "attribute", "value", "type",
 })
@@ -234,6 +237,17 @@ def _csharp_collect_type_refs(
         for c in node.children:
             if c.is_named:
                 _csharp_collect_type_refs(c, source, generic, out, skip)
+        return
+    if t == "tuple_type":
+        # A named tuple element carries both a `type` and a `name` field
+        # (`(int mode, string label)`). Only the `type` field feeds
+        # type-reference collection; the `name` is an identifier, not a type
+        # reference, and minting it produces junk "type" nodes (#3796).
+        for el in node.children:
+            if el.type == "tuple_element":
+                type_child = el.child_by_field_name("type")
+                if type_child is not None:
+                    _csharp_collect_type_refs(type_child, source, generic, out, skip)
         return
     if node.is_named:
         for c in node.children:
@@ -732,6 +746,39 @@ def _kotlin_user_type_name(user_type_node, source: bytes) -> str | None:
                         name = text
                     break
     return name
+
+def _kotlin_annotation_names(declaration_node, source: bytes) -> list[tuple[str, str]]:
+    """Collect ``(simple, raw)`` annotation names from a Kotlin declaration's
+    `modifiers` child, safely handling `use_site_target` and parameters."""
+    names: list[tuple[str, str]] = []
+    modifiers = None
+    if declaration_node is None:
+        return names
+    for child in declaration_node.children:
+        if child.type == "modifiers":
+            modifiers = child
+            break
+    if modifiers is None:
+        return names
+    for anno in modifiers.children:
+        if anno.type != "annotation":
+            continue
+        # Support bracketed lists: @[Inject VisibleForTesting]
+        for sub in anno.children:
+            user_type_node = None
+            if sub.type == "user_type":
+                user_type_node = sub
+            elif sub.type == "constructor_invocation":
+                for inner in sub.children:
+                    if inner.type == "user_type":
+                        user_type_node = inner
+                        break
+            if user_type_node is not None:
+                name = _kotlin_user_type_name(user_type_node, source)
+                if name:
+                    raw = _read_text(user_type_node, source)
+                    names.append((name, raw))
+    return names
 
 def _kotlin_collect_type_refs(node, source: bytes, generic: bool, out: list[tuple[str, str]]) -> None:
     """Walk a Kotlin type expression; append (name, role) tuples."""
@@ -2923,6 +2970,75 @@ def _swift_extra_walk(node, source: bytes, file_nid: str, stem: str, str_path: s
         return True
     return False
 
+def _scala_extra_walk(node, source: bytes, file_nid: str, stem: str, str_path: str,
+                      nodes: list, edges: list, seen_ids: set, function_bodies: list,
+                      parent_class_nid: str | None, add_node_fn, add_edge_fn,
+                      walk_fn) -> bool:
+    """Emit a node per Scala 3 enum case with a case_of edge. Returns True if handled.
+
+    tree-sitter-scala wraps the members of an `enum` in `enum_case_definitions`,
+    whose children are `simple_enum_case` (`case Red`) or `full_enum_case`
+    (`case Add(x: Int, y: Int)`); both carry the case name as an `identifier`
+    child. Without this the enum type is a class-like container whose members
+    were never emitted, leaving the type a leaf. This is the Scala parity of
+    Java #1719 (enum_constant), Kotlin #1738 (enum_entry), and Swift.
+
+    Case constructor parameter types (`Add(x: Int)`) and per-case `extends`
+    arguments are not linked; the case node and its case_of edge are the fix
+    for the dropped members.
+    """
+    if node.type == "enum_case_definitions" and parent_class_nid:
+        for case in node.children:
+            if case.type not in ("simple_enum_case", "full_enum_case"):
+                continue
+            name_node = next(
+                (c for c in case.children if c.type == "identifier"), None
+            )
+            if name_node is None:
+                continue
+            case_name = _read_text(name_node, source)
+            if not case_name:
+                continue
+            line = case.start_point[0] + 1
+            case_nid = _make_id(parent_class_nid, case_name)
+            # Scala is case-sensitive while the id recipe casefolds, so two
+            # members that differ only in case would collide on one id; the
+            # first declaration keeps the node rather than a second edge on it.
+            if case_nid not in seen_ids:
+                add_node_fn(case_nid, case_name, line)
+                add_edge_fn(parent_class_nid, case_nid, "case_of", line)
+        return True
+    return False
+
+def _cpp_extra_walk(node, source: bytes, file_nid: str, stem: str, str_path: str,
+                    nodes: list, edges: list, seen_ids: set, function_bodies: list,
+                    parent_class_nid: str | None, add_node_fn, add_edge_fn) -> bool:
+    """Emit a node per C++ enumerator with a case_of edge. Returns True if handled.
+
+    An `enum` / `enum class` is now a class-like container, so its body
+    (`enumerator_list`) is walked with the enum as parent. Each member is an
+    `enumerator` node (`Red`, `Green = 2`) whose name is its `name` field
+    (an `identifier`). Without this the enum type is a memberless leaf. This is
+    the C++ parity of Java #1719 (enum_constant), Swift, and Scala.
+    """
+    if node.type == "enumerator" and parent_class_nid:
+        name_node = node.child_by_field_name("name")
+        if name_node is None:
+            name_node = next(
+                (c for c in node.children if c.type == "identifier"), None
+            )
+        if name_node is None:
+            return True
+        member_name = _read_text(name_node, source)
+        if member_name:
+            line = node.start_point[0] + 1
+            member_nid = _make_id(parent_class_nid, member_name)
+            if member_nid not in seen_ids:
+                add_node_fn(member_nid, member_name, line)
+                add_edge_fn(parent_class_nid, member_nid, "case_of", line)
+        return True
+    return False
+
 def _java_extra_walk(node, source: bytes, file_nid: str, stem: str, str_path: str,
                      nodes: list, edges: list, seen_ids: set, function_bodies: list,
                      parent_class_nid: str | None, add_node_fn, add_edge_fn,
@@ -4098,6 +4214,50 @@ def _extract_generic(
                                             add_edge(class_nid, target, "references", line,
                                                      context="generic_arg")
 
+                annotation_targets: set[str] = set()
+                for anno_name, anno_raw in _kotlin_annotation_names(node, source):
+                    target_nid = ensure_named_node(anno_name, line)
+                    if target_nid != class_nid and target_nid not in annotation_targets:
+                        add_edge(class_nid, target_nid, "references", line, context="attribute")
+                        annotation_targets.add(target_nid)
+
+                for c in node.children:
+                    if c.type == "primary_constructor":
+                        for cp_list in c.children:
+                            if cp_list.type == "class_parameters":
+                                for cp in cp_list.children:
+                                    if cp.type != "class_parameter":
+                                        continue
+                                    has_val_var = False
+                                    for sub in cp.children:
+                                        if sub.type in ("val", "var"):
+                                            has_val_var = True
+                                            break
+                                    if not has_val_var:
+                                        continue
+                                    ptype = None
+                                    for sub in cp.children:
+                                        if sub.type in ("user_type", "nullable_type", "type_reference"):
+                                            ptype = sub
+                                            break
+                                    if ptype is not None:
+                                        cp_line = cp.start_point[0] + 1
+                                        refs: list[tuple[str, str]] = []
+                                        _kotlin_collect_type_refs(ptype, source, False, refs)
+                                        for ref_name, role in refs:
+                                            ctx = "generic_arg" if role == "generic_arg" else "field"
+                                            target_nid = ensure_named_node(ref_name, cp_line)
+                                            if target_nid != class_nid:
+                                                add_edge(class_nid, target_nid, "references",
+                                                         cp_line, context=ctx)
+                                        param_annotation_targets: set[str] = set()
+                                        for anno_name, anno_raw in _kotlin_annotation_names(cp, source):
+                                            target_nid = ensure_named_node(anno_name, cp_line)
+                                            if target_nid != class_nid and target_nid not in param_annotation_targets:
+                                                add_edge(class_nid, target_nid, "references",
+                                                         cp_line, context="attribute")
+                                                param_annotation_targets.add(target_nid)
+
             # Ruby: `class Dog < Animal` puts the base class in the `superclass`
             # field (a `<` token followed by a constant or scope_resolution).
             # There was no Ruby branch, so every Ruby inherits edge was dropped.
@@ -4764,9 +4924,13 @@ def _extract_generic(
             # Field-type references stay class-gated: top-level properties keep
             # their pre-#2565 (no-references) behavior unchanged.
             if parent_class_nid:
+                # #3884: the annotation loop below also reads `line`. An annotated
+                # property with an inferred type has no type node, so assigning
+                # `line` only inside that branch raised UnboundLocalError and
+                # _safe_extract dropped the whole file.
+                line = node.start_point[0] + 1
                 type_node = _kotlin_property_type_node(node)
                 if type_node is not None:
-                    line = node.start_point[0] + 1
                     refs: list[tuple[str, str]] = []
                     _kotlin_collect_type_refs(type_node, source, False, refs)
                     for ref_name, role in refs:
@@ -4774,6 +4938,12 @@ def _extract_generic(
                         target_nid = ensure_named_node(ref_name, line)
                         if target_nid != parent_class_nid:
                             add_edge(parent_class_nid, target_nid, "references", line, context=ctx)
+                annotation_targets: set[str] = set()
+                for anno_name, anno_raw in _kotlin_annotation_names(node, source):
+                    target_nid = ensure_named_node(anno_name, line)
+                    if target_nid != parent_class_nid and target_nid not in annotation_targets:
+                        add_edge(parent_class_nid, target_nid, "references", line, context="attribute")
+                        annotation_targets.add(target_nid)
             # #2565: seed the initializer into initializer_nodes so walk_calls
             # collects its calls (`val repo = createRepo()`), which previously
             # died at the `return` below. Seeding the WHOLE expression (not just
@@ -4934,11 +5104,11 @@ def _extract_generic(
             # it a `contains` edge from the enclosing type. The declarator loop
             # below still runs, since `class Inner { } inst;` declares a member
             # alongside the type.
-            # Only class/struct nested types are recovered here: `enum_specifier`
-            # is deliberately not in C++'s `class_types`, so a nested `enum` and
-            # its enumerators are still not emitted. That is outside #2876's scope
-            # (which is about nested class/struct and C++/CLI) and is left as a
-            # known gap rather than widened here.
+            # `enum_specifier` is now in C++'s `class_types` (#3939), so a nested
+            # `enum` / `enum class` inside a class or namespace body is recovered
+            # the same way: it gets a `contains` edge from the enclosing type and
+            # its enumerators get `case_of` edges via `_cpp_extra_walk`. Nested
+            # class/struct types (#2876) are recovered through the same branch.
             is_nested_type = (
                 type_node is not None
                 and type_node.type in config.class_types
@@ -5295,6 +5465,12 @@ def _extract_generic(
                         target_nid = ensure_named_node(ref_name, line)
                         if target_nid != func_nid:
                             add_edge(func_nid, target_nid, "references", line, context=ctx)
+                annotation_targets: set[str] = set()
+                for anno_name, anno_raw in _kotlin_annotation_names(node, source):
+                    target_nid = ensure_named_node(anno_name, line)
+                    if target_nid != func_nid and target_nid not in annotation_targets:
+                        add_edge(func_nid, target_nid, "references", line, context="attribute")
+                        annotation_targets.add(target_nid)
 
             if config.ts_module == "tree_sitter_swift":
                 for p in node.children:
@@ -5592,7 +5768,10 @@ def _extract_generic(
                                   ensure_named_node):
                 return
 
-        if config.ts_module == "tree_sitter_java":
+        # Groovy shares Java's `enum_constant` node shape (name field + optional
+        # class_body), so it reuses the Java enum-constant handler to emit a node
+        # per member with a `case_of` edge instead of leaving the enum a leaf.
+        if config.ts_module in ("tree_sitter_java", "tree_sitter_groovy"):
             if _java_extra_walk(node, source, file_nid, stem, str_path,
                                 nodes, edges, seen_ids, function_bodies,
                                 parent_class_nid, add_node, add_edge, walk):
@@ -5602,6 +5781,21 @@ def _extract_generic(
             if _kotlin_extra_walk(node, source, file_nid, stem, str_path,
                                   nodes, edges, seen_ids, function_bodies,
                                   parent_class_nid, add_node, add_edge, walk):
+                return
+
+        # Scala 3 enum cases (`case Red`, `case Add(x: Int)`) nest under an
+        # `enum_case_definitions` wrapper; emit a node + case_of edge per case.
+        if config.ts_module == "tree_sitter_scala":
+            if _scala_extra_walk(node, source, file_nid, stem, str_path,
+                                 nodes, edges, seen_ids, function_bodies,
+                                 parent_class_nid, add_node, add_edge, walk):
+                return
+
+        # C++ enumerators (`Red`, `Green = 2`) inside an enum / enum class body.
+        if config.ts_module == "tree_sitter_cpp":
+            if _cpp_extra_walk(node, source, file_nid, stem, str_path,
+                               nodes, edges, seen_ids, function_bodies,
+                               parent_class_nid, add_node, add_edge):
                 return
 
         if config.ts_module == "tree_sitter_ruby":
@@ -6317,8 +6511,8 @@ def _extract_generic(
                         is_member_call = True
                         if receiver.type == "identifier":
                             member_receiver = _read_text(receiver, source)
-                        elif receiver.type == "this":
-                            member_receiver = "this"
+                        elif receiver.type in ("this", "super"):
+                            member_receiver = receiver.type
                         elif receiver.type == "field_access":
                             owner = receiver.child_by_field_name("object")
                             field = receiver.child_by_field_name("field")
@@ -6352,6 +6546,21 @@ def _extract_generic(
                 func_node = node.child_by_field_name(config.call_function_field) if config.call_function_field else None
                 if func_node is None and node.type == "new_expression":
                     func_node = node.child_by_field_name("constructor")
+                if node.type in _JSX_ELEMENT_TYPES:
+                    # `<Comp />` / `<Comp>` renders Comp; the tag is the `name` field.
+                    # Same rule as the JSX transform: a tag starting with a lowercase
+                    # letter (`<div>`) is an intrinsic element, not a symbol in scope,
+                    # so it must not bind by name to a same-named function.
+                    # Only bare identifiers are handled. Member tags (`<icons.Close>`,
+                    # `<props.Comp>`, `<Ctx.Provider>`) are skipped: with a lowercase
+                    # receiver the member path falls back to the bare property name and
+                    # binds to an unrelated local function. Fragments and namespaced
+                    # tags (`<svg:rect>`) have no identifier name either.
+                    func_node = node.child_by_field_name("name")
+                    if (func_node is None
+                            or func_node.type != "identifier"
+                            or _read_text(func_node, source)[:1].islower()):
+                        func_node = None
                 if func_node:
                     if func_node.type == "identifier":
                         callee_name = _read_text(func_node, source)

@@ -1598,6 +1598,52 @@ def test_python_module_qualified_call_requires_the_import(tmp_path):
     assert bad == [], f"non-imported receiver must not link cross-file: {bad}"
 
 
+def test_python_module_call_resolves_when_same_file_imports_function_with_nested_def(tmp_path):
+    """When a file imports both a module and a function from that module, and the
+    function contains a nested def, `module.func()` calls must still resolve (#3887).
+
+    Nested functions are tracked as `contains` children of their enclosing function
+    (#3410). The module resolver must not mistake the enclosing function for an
+    imported module node, which would cause an ambiguity bailout and drop the call."""
+    services = tmp_path / "services"
+    services.mkdir()
+    (services / "__init__.py").write_text("")
+    (services / "store.py").write_text(
+        "def sort_todos(todos):\n"
+        "    def key(t):\n"
+        "        return t\n"
+        "    return sorted(todos, key=key)\n\n"
+        "def parse_todo_file(path):\n"
+        "    return path\n"
+    )
+    api = tmp_path / "api"
+    api.mkdir()
+    (api / "__init__.py").write_text("")
+    views = api / "views.py"
+    views.write_text(
+        "from services import store\n"
+        "from services.store import sort_todos\n\n"
+        "def get_archived_panel():\n"
+        "    return store.parse_todo_file(1)\n\n"
+        "def board():\n"
+        "    return sort_todos([])\n"
+    )
+    result = extract(
+        [views, services / "store.py", services / "__init__.py", api / "__init__.py"],
+        cache_root=tmp_path,
+        root=tmp_path,
+    )
+    nodes = {n["id"]: n for n in result["nodes"]}
+    edges = [
+        e for e in result["edges"]
+        if e["relation"] == "calls"
+        and "get_archived_panel" in nodes[e["source"]]["label"]
+        and "parse_todo_file" in nodes[e["target"]]["label"]
+    ]
+    assert len(edges) == 1, f"expected get_archived_panel->parse_todo_file edge, got {edges}"
+    assert edges[0]["confidence"] == "EXTRACTED"
+
+
 def test_python_from_import_alias_module_call_resolves(tmp_path):
     """`from pkg import mod as alias` must resolve `alias.func()` the same way the
     unaliased `from pkg import mod` / `mod.func()` form already does (#2082). The
@@ -2248,6 +2294,83 @@ def test_extract_parallel_returns_false_when_pool_cannot_start(tmp_path, monkeyp
     ok = extract_mod._extract_parallel(uncached, per_file, tmp_path, 2, 1)
     assert ok is False, "a pool that cannot start must hand back to sequential, not raise"
     assert "No space left on device" in capsys.readouterr().out, "warning must name the OS error"
+
+
+def test_spawn_cannot_reimport_main_true_for_stdin_caller(monkeypatch):
+    """stdin (`… | python -`) leaves __main__.__file__ as a non-file (`<stdin>`),
+    which spawn workers cannot re-import — the pool is unusable up front (#3669)."""
+    import multiprocessing
+    import __main__
+    from graphify import extract as extract_mod
+
+    monkeypatch.setattr(multiprocessing, "get_start_method", lambda allow_none=True: "spawn")
+    monkeypatch.setattr(__main__, "__file__", "<stdin>", raising=False)
+    assert extract_mod._spawn_cannot_reimport_main() is True
+
+
+def test_spawn_cannot_reimport_main_true_for_repl_without_file(monkeypatch):
+    """A REPL / `python -c` __main__ has no __file__ attribute at all."""
+    import multiprocessing
+    import __main__
+    from graphify import extract as extract_mod
+
+    monkeypatch.setattr(multiprocessing, "get_start_method", lambda allow_none=True: "spawn")
+    monkeypatch.delattr(__main__, "__file__", raising=False)
+    assert extract_mod._spawn_cannot_reimport_main() is True
+
+
+def test_spawn_cannot_reimport_main_false_for_real_script(tmp_path, monkeypatch):
+    """A normal script whose __main__ is a real file CAN be re-imported, so the
+    pool is usable and must not be skipped (that case is the common happy path)."""
+    import multiprocessing
+    import __main__
+    from graphify import extract as extract_mod
+
+    script = tmp_path / "runner.py"
+    script.write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(multiprocessing, "get_start_method", lambda allow_none=True: "spawn")
+    monkeypatch.setattr(__main__, "__file__", str(script), raising=False)
+    assert extract_mod._spawn_cannot_reimport_main() is False
+
+
+def test_spawn_cannot_reimport_main_false_under_fork(monkeypatch):
+    """The fork start method (Linux default) does not re-import __main__, so a
+    stdin caller is fine and the pool must not be pre-emptively skipped."""
+    import multiprocessing
+    import __main__
+    from graphify import extract as extract_mod
+
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(multiprocessing, "get_start_method", lambda allow_none=True: "fork")
+    monkeypatch.setattr(__main__, "__file__", "<stdin>", raising=False)
+    assert extract_mod._spawn_cannot_reimport_main() is False
+
+
+def test_extract_skips_pool_up_front_on_unusable_main(tmp_path, monkeypatch, capsys):
+    """With >= _PARALLEL_THRESHOLD uncached files but an unusable __main__, the
+    pool is not attempted at all — extract() runs sequentially, producing correct
+    output with an explanatory note instead of a wall of BrokenProcessPool
+    tracebacks (#3669)."""
+    from graphify import extract as extract_mod
+
+    files = [FIXTURES / "sample.py"] * 25  # >= _PARALLEL_THRESHOLD
+    cache_root = tmp_path / "cache"
+    cache_root.mkdir()
+
+    calls = {"parallel": 0}
+
+    def fake_parallel(*a, **kw):
+        calls["parallel"] += 1
+        return True
+
+    monkeypatch.setattr(extract_mod, "_extract_parallel", fake_parallel)
+    monkeypatch.setattr(extract_mod, "_spawn_cannot_reimport_main", lambda: True)
+
+    result = extract_mod.extract(files, cache_root=cache_root)
+
+    assert calls["parallel"] == 0, "the pool must not be attempted when __main__ is unusable"
+    assert result["nodes"], "sequential extraction must still produce nodes"
+    assert "sequentially" in capsys.readouterr().err, "must explain the sequential fallback"
 
 
 def test_extract_parallel_skips_pool_when_max_workers_is_one(tmp_path, monkeypatch):

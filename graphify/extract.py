@@ -82,6 +82,7 @@ from graphify.extractors.resolution import (  # noqa: E402,F401
     _JS_PRIMITIVE_TYPES,
     _JS_RESOLVE_EXTS,
     _PACKAGE_IMPORTS_CACHE,
+    _SCAN_ROOT_NAMESPACE_CACHE,
     _TSCONFIG_ALIAS_CACHE,
     _TSCONFIG_BASEURL_CACHE,
     _VUE_SCRIPT_LANG_RE,
@@ -1239,7 +1240,7 @@ _JS_CONFIG = LanguageConfig(
     class_types=frozenset({"class_declaration"}),
     function_types=frozenset({"function_declaration", "generator_function_declaration", "method_definition"}),
     import_types=frozenset({"import_statement", "export_statement"}),
-    call_types=frozenset({"call_expression", "new_expression"}),
+    call_types=frozenset({"call_expression", "new_expression", "jsx_opening_element", "jsx_self_closing_element"}),
     call_function_field="function",
     call_accessor_node_types=frozenset({"member_expression"}),
     call_accessor_field="property",
@@ -1287,7 +1288,8 @@ _TSX_CONFIG = LanguageConfig(
     class_types=_TS_CONFIG.class_types,
     function_types=_TS_CONFIG.function_types,
     import_types=_TS_CONFIG.import_types,
-    call_types=_TS_CONFIG.call_types,
+    # JSX component usage (`<Comp />`) renders Comp; extracted like a call.
+    call_types=_TS_CONFIG.call_types | {"jsx_opening_element", "jsx_self_closing_element"},
     call_function_field=_TS_CONFIG.call_function_field,
     call_accessor_node_types=_TS_CONFIG.call_accessor_node_types,
     call_accessor_field=_TS_CONFIG.call_accessor_field,
@@ -1318,7 +1320,10 @@ _JAVA_CONFIG = LanguageConfig(
 
 _GROOVY_CONFIG = LanguageConfig(
     ts_module="tree_sitter_groovy",
-    class_types=frozenset({"class_declaration", "interface_declaration"}),
+    # enum_declaration shares the name/body contract, so a Groovy enum becomes a
+    # first-class type node with its constants (via _java_extra_walk) instead of
+    # being dropped along with everything it declares (#Java enum parity).
+    class_types=frozenset({"class_declaration", "interface_declaration", "enum_declaration"}),
     function_types=frozenset({"method_declaration", "constructor_declaration"}),
     import_types=frozenset({"import_declaration"}),
     call_types=frozenset({"method_invocation"}),
@@ -1344,7 +1349,12 @@ _C_CONFIG = LanguageConfig(
 
 _CPP_CONFIG = LanguageConfig(
     ts_module="tree_sitter_cpp",
-    class_types=frozenset({"class_specifier", "struct_specifier"}),
+    # enum_specifier is a class-like container: an `enum` / `enum class` owns a
+    # set of enumerators. Its name and body sit on the same `name`/`body` fields
+    # as struct_specifier (type_identifier + enumerator_list), so it gets a node
+    # and a body walk; the enumerators are emitted by _cpp_extra_walk (the C++
+    # parity of Java #1719 / Swift / Scala enums).
+    class_types=frozenset({"class_specifier", "struct_specifier", "enum_specifier"}),
     function_types=frozenset({"function_definition"}),
     import_types=frozenset({"preproc_include"}),
     call_types=frozenset({"call_expression"}),
@@ -1435,7 +1445,10 @@ _SCALA_CONFIG = LanguageConfig(
     ts_module="tree_sitter_scala",
     # traits are class-like containers with their own heritage (extends / with),
     # so they need a node and the heritage walk just like classes and objects.
-    class_types=frozenset({"class_definition", "object_definition", "trait_definition"}),
+    # Scala 3 `enum` is a class-like container too: it owns methods and a set of
+    # cases, so it needs a node and a body walk like the others (its cases are
+    # emitted by _scala_extra_walk, the parity of Java #1719 / Kotlin #1738).
+    class_types=frozenset({"class_definition", "object_definition", "trait_definition", "enum_definition"}),
     function_types=frozenset({"function_definition"}),
     import_types=frozenset({"import_declaration"}),
     call_types=frozenset({"call_expression"}),
@@ -1443,7 +1456,9 @@ _SCALA_CONFIG = LanguageConfig(
     call_accessor_node_types=frozenset({"field_expression"}),
     call_accessor_field="field",
     name_fallback_child_types=("identifier",),
-    body_fallback_child_types=("template_body",),
+    # an enum wraps its members in `enum_body` rather than a `template_body`,
+    # so the body walk needs it to reach the enum's methods and cases.
+    body_fallback_child_types=("template_body", "enum_body"),
     function_boundary_types=frozenset({"function_definition"}),
     import_handler=_import_scala,
 )
@@ -2400,6 +2415,42 @@ def extract_svelte(path: Path) -> dict:
     return result
 
 
+_ASTRO_FRONTMATTER_RE = re.compile(r"\A\s*---[^\S\r\n]*\r?\n([\s\S]*?)\r?\n---")
+_ASTRO_SCRIPT_RE = re.compile(
+    r"<script\b((?:\"[^\"]*\"|'[^']*'|[^>\"'])*)>([\s\S]*?)</script\s*>",
+    re.IGNORECASE,
+)
+_ASTRO_NON_JS_TYPE_RE = re.compile(
+    r"""\btype\s*=\s*["']?(?!module\b|text/javascript\b|application/javascript\b)""",
+    re.IGNORECASE,
+)
+
+
+def _astro_mask_non_script(src: str) -> str:
+    """Blank everything in a ``.astro`` file except frontmatter and JS ``<script>`` bodies.
+
+    Every character outside those regions becomes a space (``\\r``/``\\n`` are kept),
+    so AST locations match the original file. Scripts with a non-JS ``type``
+    (``application/ld+json`` and the like) are blanked too: their bodies are not
+    statements and would only add parse errors.
+    """
+    keep: list[tuple[int, int]] = []
+    fm = _ASTRO_FRONTMATTER_RE.match(src)
+    if fm:
+        keep.append((fm.start(1), fm.end(1)))
+    for m in _ASTRO_SCRIPT_RE.finditer(src, fm.end() if fm else 0):
+        if not _ASTRO_NON_JS_TYPE_RE.search(m.group(1)):
+            keep.append((m.start(2), m.end(2)))
+    chars = [c if c in "\r\n" else " " for c in src]
+    for start, end in keep:
+        chars[start:end] = src[start:end]
+        # Terminate the region in place of the following `<`, so two scripts on
+        # one line don't run together into a single statement.
+        if end < len(chars) and chars[end] == " ":
+            chars[end] = ";"
+    return "".join(chars)
+
+
 def extract_astro(path: Path) -> dict:
     """Extract imports from .astro files: frontmatter (TS) + template regex fallback.
 
@@ -2412,8 +2463,19 @@ def extract_astro(path: Path) -> dict:
     silently dropped (#850). Mirrors :func:`extract_svelte` — same regex-rescue
     approach, scanning the frontmatter block and any client-side ``<script>`` blocks
     for static and dynamic imports.
+
+    The AST pass parses only the frontmatter and JS ``<script>`` bodies with the TS
+    grammar (Astro's default), blanking everything else so line numbers still
+    line up — the same masking as :func:`_vue_mask_non_script`. Parsing the whole
+    file flagged every template as a syntax error and dropped frontmatter symbols.
     """
-    result = _extract_generic(path, _JS_CONFIG)
+    try:
+        src = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {"nodes": [], "edges": []}
+    masked = _astro_mask_non_script(src).encode("utf-8")
+    masked = _normalize_ts_import_types(masked) or masked
+    result = _extract_generic(path, _TS_CONFIG, source_override=masked)
     try:
         import re as _re
         src = path.read_text(encoding="utf-8", errors="replace")
@@ -3971,6 +4033,7 @@ def _resolve_python_member_calls(
             file_aliases = import_alias_by_filenode.get(caller_file, {})
             mods = [t for t in imported_by_filenode.get(caller_file, ())
                     if t in contains_children
+                    and t not in file_of_node
                     and (_module_stem_key(t) == rkey or file_aliases.get(t) == rkey)]
             if len(mods) != 1:  # not an imported module, or ambiguous -> bail
                 continue
@@ -4572,7 +4635,7 @@ def _resolve_java_member_calls(
 ) -> None:
     """Resolve Java member calls against the receiver's declared type.
 
-    Explicit type receivers and ``this`` are exact. Fields declared on the
+    Explicit type receivers, ``this`` and ``super`` are exact. Fields declared on the
     caller's class plus method parameters and explicit locals are inferred from
     the extractor's method-scoped type table. A missing or ambiguous receiver
     type is skipped rather than falling back to a bare method-name match.
@@ -4631,6 +4694,33 @@ def _resolve_java_member_calls(
             queue.extend(inherits_bases.get(cls, []))
         return None
 
+    def _jvm_bases(type_nid: str) -> list[str] | None:
+        bases = inherits_bases.get(type_nid, [])
+        for base in bases:
+            family = _lang_family(node_by_id.get(base, {}).get("source_file"))
+            if base == type_nid or family != "jvm":
+                return None
+        return bases
+
+    def _method_on_type_or_bases(type_nid: str, callee_key: str) -> str | None:
+        hits: set[str] = set()
+        seen: set[str] = set()
+        frontier = [type_nid]
+        while frontier:
+            nid = frontier.pop()
+            if nid in seen:
+                continue
+            seen.add(nid)
+            declared = method_index.get((nid, callee_key))
+            if declared:
+                hits |= declared
+                continue
+            bases = _jvm_bases(nid)
+            if bases is None:
+                return None
+            frontier.extend(bases)
+        return next(iter(hits)) if len(hits) == 1 else None
+
     for result in per_file:
         for raw_call in result.get("raw_calls", []):
             if raw_call.get("lang") != "java" or not raw_call.get("is_member_call"):
@@ -4647,6 +4737,12 @@ def _resolve_java_member_calls(
                 exact = True
                 if not type_nid:
                     continue
+            elif receiver == "super":
+                superclasses = _jvm_bases(enclosing_type.get(caller, ""))
+                if not superclasses or len(superclasses) != 1:
+                    continue
+                type_nid = superclasses[0]
+                exact = True
             else:
                 type_name = raw_call.get("receiver_type")
                 if not type_name and receiver[:1].isupper():
@@ -4674,11 +4770,8 @@ def _resolve_java_member_calls(
                     continue
                 type_nid = type_defs[0]
 
-            method_nids = method_index.get((type_nid, key(callee)), set())
-            if len(method_nids) != 1:
-                continue
-            method_nid = next(iter(method_nids))
-            if method_nid == caller or (caller, method_nid) in existing_pairs:
+            method_nid = _method_on_type_or_bases(type_nid, key(callee))
+            if not method_nid or method_nid == caller or (caller, method_nid) in existing_pairs:
                 continue
             existing_pairs.add((caller, method_nid))
             all_edges.append({
@@ -6945,9 +7038,39 @@ def _extract_single_file(args: tuple) -> tuple[int, dict]:
     # (e.g. a transient batch/parallel hiccup). Caching it makes the empty
     # byte-stable across runs and silently blinds affected/explain to and
     # through the file (#1666); skipping the write lets a rerun self-heal.
-    if not bypass_cache and "error" not in result and result.get("nodes"):
+    # An intentional decline or virtual workspace root (result.get("skipped"))
+    # is cached so repeat runs do not re-extract and re-report it (#3910).
+    if not bypass_cache and "error" not in result and (result.get("nodes") or result.get("skipped")):
         save_cached(path, result, root, cache_root=cache_location)
     return idx, result
+
+
+def _spawn_cannot_reimport_main() -> bool:
+    """True when a spawn-based process pool cannot bootstrap because the caller's
+    ``__main__`` has no importable file — stdin (``… | python -``), ``python -c``,
+    or a REPL.
+
+    Under the spawn start method (the Windows default, and macOS since 3.8) each
+    worker re-imports the parent's ``__main__`` by its ``__file__`` path. For a
+    stdin/-c/REPL caller that path is missing or bogus (``<stdin>``), so every
+    worker dies during bootstrap and the pool raises ``BrokenProcessPool`` before
+    any work is done. The shipped SKILL.md pipes a heredoc into the interpreter,
+    so on Windows this is the common path, not an edge case — detecting it up
+    front lets the caller run sequentially without a wall of worker tracebacks
+    (#3669). A script WITH a real ``__main__`` file but no ``if __name__ ==
+    "__main__"`` guard is a different failure this does not (and cannot) catch
+    here; that one still surfaces via the ``BrokenProcessPool`` fallback."""
+    import multiprocessing
+
+    if (
+        multiprocessing.get_start_method(allow_none=True) != "spawn"
+        and sys.platform != "win32"
+    ):
+        return False
+    import __main__
+
+    main_file = getattr(__main__, "__file__", None)
+    return main_file is None or not os.path.isfile(main_file)
 
 
 def _extract_parallel(
@@ -7119,8 +7242,9 @@ def _extract_sequential(
         bypass_cache = path.suffix in _JS_CACHE_BYPASS_SUFFIXES
         # XAML boundary anchors on `root` (the corpus), not the cache location.
         result = _safe_extract_with_xaml_root(extractor, path, root)
-        # See _extract_single_file: don't cache an anomalous zero-node result (#1666).
-        if not bypass_cache and "error" not in result and result.get("nodes"):
+        # See _extract_single_file: don't cache an anomalous zero-node result (#1666),
+        # but cache intentional declines/virtual manifests carrying `skipped` (#3910).
+        if not bypass_cache and "error" not in result and (result.get("nodes") or result.get("skipped")):
             save_cached(path, result, root, cache_root=cache_location)
         per_file[idx] = result
     if total_files >= _PROGRESS_INTERVAL:
@@ -7198,6 +7322,7 @@ def extract(
     _PACKAGE_IMPORTS_CACHE.clear()
     _XAML_CSHARP_CLASS_CACHE.clear()
     _MD_LINK_INDEX_CACHE.clear()
+    _SCAN_ROOT_NAMESPACE_CACHE.clear()
     # Path-resolution memoization (#3500) is keyed by (path, cwd) with no mtime
     # component, so — like the alias caches above — a symlink repoint or a path
     # that starts/stops existing between rebuilds in a long-lived `graphify
@@ -7277,6 +7402,26 @@ def extract(
 
     # Phase 2: extract uncached files (parallel or sequential)
     if uncached_work:
+        # Skip the pool up front when spawn workers could not re-import our
+        # __main__ (stdin/-c/REPL) — otherwise every worker dies on bootstrap and
+        # the run is a wall of BrokenProcessPool tracebacks before falling back to
+        # the same sequential path anyway. This is exactly what SKILL.md's stdin
+        # invocation triggers on Windows (#3669).
+        if (
+            parallel
+            and len(uncached_work) >= _PARALLEL_THRESHOLD
+            and _spawn_cannot_reimport_main()
+        ):
+            print(
+                "  note: running AST extraction sequentially — a parallel pool "
+                "needs an importable __main__ to relaunch workers, which a stdin "
+                "(`… | python -`), `python -c`, or REPL invocation does not have. "
+                "Write the step to a .py file (or pass parallel=False) to silence "
+                "this.",
+                file=sys.stderr,
+                flush=True,
+            )
+            parallel = False
         ran_parallel = False
         if parallel and len(uncached_work) >= _PARALLEL_THRESHOLD:
             ran_parallel = _extract_parallel(

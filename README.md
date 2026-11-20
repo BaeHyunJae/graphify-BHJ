@@ -30,7 +30,7 @@
 <p align="center">
   <a href="https://app.graphify.com/signup?utm_source=github&utm_medium=readme&utm_campaign=oss"><b>Start free, no card required &rarr;</b></a>
   <br/>
-  <b>Cut agent token spend by 80%.</b> Graphify Cloud is always-on memory that governs your agents, keeps code quality high, and proves correctness with formal verification.
+  <b>Graphify Cloud</b> is always-on memory that governs your agents, keeps code quality high, and proves correctness with formal verification.
 </p>
 
 Type `/graphify` in your AI coding assistant and it maps your entire project (code, docs, PDFs, images, videos) into a **knowledge graph** you can **query instead of grepping** through files.
@@ -49,7 +49,7 @@ Type `/graphify` in your AI coding assistant and it maps your entire project (co
   <em>The FastAPI codebase mapped by graphify. Every node is a concept, colors are detected communities, and the whole thing is clickable in graph.html.</em>
 </p>
 
-**Get started** (30 seconds). Needs Python 3.10+ and uv (or pipx):
+**Get started** (30 seconds). Needs Python 3.11+ and uv (or pipx):
 
 ```bash
 uv tool install graphifyy      # install the CLI (or: pipx install graphifyy)
@@ -125,7 +125,7 @@ What you get out of the box:
 | **Local-first** | Code is parsed locally with tree-sitter (no LLM, nothing leaves your machine); only the semantic pass over docs/media calls a backend, and only if you configure one |
 
 > [!TIP]
-> Running this across many repos or a monorepo? [Graphify Cloud](https://app.graphify.com/signup?utm_source=github&utm_medium=readme&utm_campaign=oss) does it continuously and cuts agent token spend by 80%, with cross-repo links, SDLC-wide code review, formal verification, and Sentry/Jira connectors. [Start free, no card required &rarr;](https://app.graphify.com/signup?utm_source=github&utm_medium=readme&utm_campaign=oss)
+> Running this across many repos or a monorepo? [Graphify Cloud](https://app.graphify.com/signup?utm_source=github&utm_medium=readme&utm_campaign=oss) does it continuously, with cross-repo links, SDLC-wide code review, formal verification, and Sentry/Jira connectors. [Start free, no card required &rarr;](https://app.graphify.com/signup?utm_source=github&utm_medium=readme&utm_campaign=oss)
 
 ---
 
@@ -161,7 +161,7 @@ Full guides and reference live at **[docs.graphify.com](https://docs.graphify.co
 
 | Requirement | Minimum | Check | Install |
 |---|---|---|---|
-| Python | 3.10+ | `python --version` | [python.org](https://www.python.org/downloads/) |
+| Python | 3.11+ | `python --version` | [python.org](https://www.python.org/downloads/) |
 | uv *(recommended)* | any | `uv --version` | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | pipx *(alternative)* | any | `pipx --version` | `pip install pipx` |
 
@@ -313,7 +313,7 @@ This writes a small config file that tells your assistant to consult the knowled
 
 `GRAPH_REPORT.md` is still available for broad architecture review.
 
-Exactly which files each platform writes (CodeBuddy's `CODEBUDDY.md` + `PreToolUse` hooks, Codex's `AGENTS.md`, Kilo's native `.kilo` plugin, Cursor's `alwaysApply` rule, and so on) is covered in **[Always-on setup](https://docs.graphify.com/guides/always-on)**.
+Exactly which files each platform writes (CodeBuddy's `CODEBUDDY.md` + `PreToolUse` hooks, Codex's `AGENTS.md`, Kilo's native `.kilo` plugin, Cursor's `alwaysApply` rule, and so on) is covered in **[Always-on setup](https://docs.graphify.com/open-source/vibe-coding)**.
 
 To remove graphify from all platforms at once: `graphify uninstall` (add `--purge` to also delete `graphify-out/`). Or use the per-platform command (e.g. `graphify claude uninstall`).
 
@@ -489,7 +489,7 @@ Every command and flag, with examples: **[CLI reference](https://docs.graphify.c
 
 [**Graphify Cloud**](https://app.graphify.com/signup?utm_source=github&utm_medium=readme&utm_campaign=oss) is the always-on layer built on top of graphify. Instead of a graph you rebuild on demand per folder, it keeps one live graph across your entire software development lifecycle:
 
-- **80% fewer tokens**: always-on memory means your agents stop re-reading and re-explaining the codebase every session.
+- **Less re-reading**: always-on memory means your agents stop re-reading and re-explaining the codebase every session.
 - **Monorepo and cross-repo**: one connected graph across every service and repository, not a graph per folder.
 - **Formal verification**: check architectural and dependency invariants against the live graph.
 - **Code review with a bird's-eye view of your SDLC**: see how a change ripples across the whole system before you merge.

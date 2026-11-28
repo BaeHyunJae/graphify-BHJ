@@ -912,8 +912,13 @@ def convert_office_file(path: Path, out_dir: Path, root: "Path | None" = None) -
     if root is None:
         # Default layout: out_dir is <root>/<graphify-out>/converted.
         root = out_dir.parent.parent
+    from graphify.paths import followed_link_relpath
+    _followed_rel = followed_link_relpath(path, root)
     try:
-        key = path.resolve().relative_to(Path(root).resolve()).as_posix()
+        if _followed_rel is not None:
+            key = _followed_rel.as_posix()  # --follow-link: lexical in-root key
+        else:
+            key = path.resolve().relative_to(Path(root).resolve()).as_posix()
     except (ValueError, OSError):
         # Not under the scan root (custom GRAPHIFY_OUT layouts, --include
         # sources, direct API callers): keep the previous absolute form rather
@@ -2153,8 +2158,43 @@ def _resolves_under_root(path: Path, root: Path) -> bool:
     return True
 
 
-def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace: bool | None = None, extra_excludes: list[str] | None = None, cache_root: Path | None = None, gitignore: bool = True) -> dict:
+def _followed_link_targets(root: Path, follow_links: list[str] | None) -> dict[Path, Path]:
+    """Map each listed in-root link folder (lexical, absolute) to its resolved target.
+
+    Fork-local ``--follow-link``: a listed folder is a junction or symbolic link
+    inside the scan root whose target may sit outside it. Entries that are not
+    an existing link directory under ``root`` are skipped with a warning.
+    """
+    targets: dict[Path, Path] = {}
+    for raw in follow_links or []:
+        rel = Path(str(raw).strip().strip("/\\"))
+        link = root / rel
+        try:
+            is_junction = getattr(os.path, "isjunction", lambda _p: False)(link)
+            if (
+                rel.is_absolute() or ".." in rel.parts
+                or not (link.is_symlink() or is_junction) or not link.is_dir()
+            ):
+                print(
+                    f"[graphify] WARNING: --follow-link {raw!r} is not a link folder "
+                    "inside the scan root; ignored.",
+                    file=sys.stderr,
+                )
+                continue
+            targets[link] = link.resolve()
+        except (OSError, RuntimeError):
+            continue
+    return targets
+
+
+def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace: bool | None = None, extra_excludes: list[str] | None = None, cache_root: Path | None = None, gitignore: bool = True, follow_links: list[str] | None = None) -> dict:
     root = root.resolve()
+    # --follow-link: listed link folders are walked as their own scan roots and
+    # their files admitted under their LEXICAL in-root path (root/<link>/...).
+    followed_links = _followed_link_targets(root, follow_links)
+    if followed_links:
+        from graphify.paths import publish_followed_links
+        publish_followed_links(list(followed_links))
     # The project's extension->language declarations (#2961) shape
     # classification for this scan.
     activate_language_overrides(root)
@@ -2339,6 +2379,14 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
                     if _ignored_for_scan(child):
                         ignored.append(str(child) + os.sep)
                         continue
+                    if child in followed_links:
+                        # Walked as its own scan root (appending extends the
+                        # loop over scan_paths), so POSIX symlinks are entered
+                        # without followlinks and Windows junctions are not
+                        # walked twice.
+                        if child not in scan_paths:
+                            scan_paths.append(child)
+                        continue
                     kept_dirs.append(d)
                 dirnames[:] = kept_dirs
                 if follow_symlinks:
@@ -2380,7 +2428,14 @@ def detect(root: Path, *, follow_symlinks: bool | None = None, google_workspace:
         # directories under the already-resolved root; a non-symlink file
         # cannot resolve outside root. On Windows, always check _resolves_under_root
         # because directory junctions are not reported as symlinks on Python 3.11.
-        if (
+        _link = next((l for l in followed_links if p.is_relative_to(l)), None)
+        if _link is not None:
+            # Under a listed link: the target must stay inside that link's own
+            # target, so a further link nested inside it is still refused.
+            if not _resolves_under_root(p, followed_links[_link]):
+                skipped_sensitive.append(str(p) + " [symlink target outside followed link]")
+                continue
+        elif (
             os.name != "posix" or follow_symlinks or in_memory or p.is_symlink()
         ) and not _resolves_under_root(p, root):
             skipped_sensitive.append(str(p) + " [symlink target outside scan root]")
@@ -3304,6 +3359,7 @@ def detect_incremental(
     extra_excludes: list[str] | None = None,
     gitignore: bool = True,
     cache_root: Path | None = None,
+    follow_links: list[str] | None = None,
 ) -> dict:
     """Like detect(), but returns only new or modified files since the last run.
 
@@ -3344,6 +3400,7 @@ def detect_incremental(
         extra_excludes=extra_excludes,
         gitignore=gitignore,
         cache_root=cache_root,
+        follow_links=follow_links,
     )
     # Pass ``root`` so a manifest written with relative keys (post-#777) is
     # re-anchored to the absolute form the rest of this function compares

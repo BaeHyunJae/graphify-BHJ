@@ -145,6 +145,7 @@ def _write_build_config(
     excludes: "list[str] | None",
     gitignore: bool | None = None,
     code_only: bool | None = None,
+    follow_links: "list[str] | None" = None,
 ) -> None:
     """Persist corpus-shaping options under ``out_dir``.
 
@@ -152,7 +153,7 @@ def _write_build_config(
     ``code_only`` records that the graph was built with ``extract --code-only``
     so a later hook/update/watch rebuild keeps that scope (#4923).
     """
-    if not excludes and gitignore is None and code_only is None:
+    if not excludes and gitignore is None and code_only is None and not follow_links:
         return
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -169,6 +170,8 @@ def _write_build_config(
             config["gitignore"] = gitignore
         if code_only is not None:
             config["code_only"] = code_only
+        if follow_links:
+            config["follow_links"] = list(follow_links)
         path.write_text(json.dumps(config), encoding="utf-8")
     except OSError:
         pass
@@ -199,6 +202,20 @@ def _read_build_gitignore(out_dir: Path) -> bool:
     except (OSError, json.JSONDecodeError):
         pass
     return True
+
+
+def _read_build_follow_links(out_dir: Path) -> list[str]:
+    """Return the persisted ``--follow-link`` folders for this graph, or [] (fork-local)."""
+    try:
+        path = out_dir / _BUILD_CONFIG_FILENAME
+        if path.is_file():
+            cfg = json.loads(path.read_text(encoding="utf-8"))
+            fl = cfg.get("follow_links") if isinstance(cfg, dict) else None
+            if isinstance(fl, list):
+                return [str(x) for x in fl if isinstance(x, str) and x]
+    except (OSError, json.JSONDecodeError):
+        pass
+    return []
 
 
 def _read_build_code_only(out_dir: Path) -> bool:
@@ -2206,6 +2223,7 @@ def _current_build_state(
     excludes: list[str] | None,
     scan_digest: str,
     code_only: bool = False,
+    follow_links: list[str] | None = None,
 ) -> dict:
     """Everything besides file content that a rebuild's output depends on (#4740).
 
@@ -2233,6 +2251,7 @@ def _current_build_state(
         "gitignore": bool(gitignore),
         "excludes": sorted(excludes or []),
         "code_only": bool(code_only),
+        "follow_links": sorted(follow_links or []),
         "rcfile": rc_digest,
         # Env knobs that change the written output rather than just the timing:
         # the viz cap removes graph.html outright, and the ambiguous-edge scale
@@ -2624,10 +2643,12 @@ def _rebuild_code(
         # #4923: honour the scope the graph was built with. Without this a
         # `--code-only` graph silently grows doc nodes on the next hook rebuild.
         _code_only = _read_build_code_only(out)
+        _follow_links = _read_build_follow_links(out)
         detected = detect(
             watch_path, follow_symlinks=follow_symlinks,
             extra_excludes=_persisted_excludes or None,
             gitignore=_gitignore_enabled,
+            follow_links=_follow_links or None,
         )
         code_files = [Path(f) for f in detected['files']['code']]
 
@@ -2670,6 +2691,7 @@ def _rebuild_code(
             excludes=_persisted_excludes,
             scan_digest=_scan_digest(detected),
             code_only=_code_only,
+            follow_links=_follow_links,
         )
 
         report_path = out / "GRAPH_REPORT.md"

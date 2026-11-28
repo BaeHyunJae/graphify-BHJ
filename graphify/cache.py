@@ -18,6 +18,7 @@ from pathlib import Path
 # (#1423); re-exported here as _GRAPHIFY_OUT for the existing call sites.
 from graphify.paths import GRAPHIFY_OUT as _GRAPHIFY_OUT
 from graphify.paths import os_long_path as _os_long_path
+from graphify.paths import followed_link_relpath as _followed_link_relpath
 from graphify.paths import stash_preread_bytes as _stash_preread_bytes
 from graphify.paths import os_replace_with_fallback as _os_replace_with_fallback
 
@@ -564,7 +565,7 @@ def file_hash(
     # to it, so every key was written absolute (#2199).
     _ensure_stat_index(_normalize_path(raw_root), cache_root=cache_root)
     resolved = _normalize_path(src.resolve())
-    abs_key = str(resolved)
+    abs_key = _stat_index_key(raw_path, raw_root, resolved)
     # The salt is the path component that enters the digest (relative to root, or
     # the absolute-path fallback). The stat-index memo MUST be keyed by it too:
     # the same file hashed under two different roots yields two different digests
@@ -579,7 +580,9 @@ def file_hash(
         # Preserve the existing fallback for a target outside the corpus. An
         # in-root symlink to such a target is excluded by collect_files(), but
         # direct cache callers still rely on the resolved external identity.
-        salt = resolved.as_posix()
+        # A file under a --follow-link folder keeps its lexical in-root path.
+        _followed_rel = _followed_link_relpath(raw_path, raw_root)
+        salt = _followed_rel.as_posix() if _followed_rel is not None else resolved.as_posix()
     else:
         walked = Path(os.path.abspath(raw_path))
         walked_root = Path(os.path.abspath(raw_root))
@@ -649,6 +652,14 @@ def file_hash(
     return digest
 
 
+def _stat_index_key(raw_path: Path, raw_root: Path, resolved: Path) -> str:
+    """Stat-index key: the resolved path, or for a file under a --follow-link
+    folder its lexical in-root path, so the on-disk index stores it relative."""
+    if _followed_link_relpath(raw_path, raw_root) is not None:
+        return str(_normalize_path(Path(os.path.abspath(raw_path))))
+    return str(resolved)
+
+
 def cached_word_count(path: Path, root: Path, compute, cache_root: "Path | None" = None) -> int:
     """Word count with the same (size, mtime_ns) stat-fastpath cache as
     :func:`file_hash`, persisted in the shared stat index.
@@ -667,7 +678,7 @@ def cached_word_count(path: Path, root: Path, compute, cache_root: "Path | None"
     raw_root = Path(root)
     src = Path(_os_long_path(raw_path))
     _ensure_stat_index(_normalize_path(raw_root), cache_root=cache_root)
-    abs_key = str(_normalize_path(src.resolve()))
+    abs_key = _stat_index_key(raw_path, raw_root, _normalize_path(src.resolve()))
     st: "os.stat_result | None" = None
     try:
         st = src.stat()
@@ -888,8 +899,10 @@ def _portability_anchors(path: "str | Path", root: "str | Path") -> tuple[list[s
         path_resolved = Path(path).resolve()
     except (OSError, RuntimeError):
         path_resolved = Path(path)
+    _followed_rel = _followed_link_relpath(path, root)
     try:
-        rel = os.path.relpath(path_resolved, root_resolved)
+        # --follow-link: the lexical in-root path, not the target's relpath.
+        rel = str(_followed_rel) if _followed_rel is not None else os.path.relpath(path_resolved, root_resolved)
     except (ValueError, OSError):
         rel = ""
 

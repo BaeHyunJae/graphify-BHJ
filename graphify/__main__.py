@@ -999,6 +999,8 @@ def _run_cli() -> None:
         print("    --out DIR, --output DIR output dir (default: <path>); writes <DIR>/graphify-out/")
         print("    --google-workspace      export .gdoc/.gsheet/.gslides shortcuts via gws before extraction")
         print("    --no-gitignore         ignore .gitignore and .git/info/exclude (prioritizes .graphifyignore)")
+        print("    --follow-link PATH      index an in-root junction/symlink folder (repeatable; persisted")
+        print("                            for later update runs; also accepted by `graphify update`)")
         print("    --no-cluster            skip clustering, write raw extraction only")
         print("    --code-only             index code (local AST, no API key) and skip doc/paper/image files")
         print("    --postgres DSN          extract schema from a live PostgreSQL database")

@@ -3518,12 +3518,24 @@ def dispatch_command(cmd: str) -> None:
         no_cluster = False
         args = sys.argv[2:]
         watch_arg: str | None = None
-        for a in args:
+        update_follow_links: list[str] = []
+        _args_iter = iter(args)
+        for a in _args_iter:
             if a == "--force":
                 force = True
                 continue
             if a == "--no-cluster":
                 no_cluster = True
+                continue
+            if a == "--follow-link":
+                _val = next(_args_iter, None)
+                if _val is None:
+                    print("error: --follow-link needs a path", file=sys.stderr)
+                    sys.exit(2)
+                update_follow_links.append(_val)
+                continue
+            if a.startswith("--follow-link="):
+                update_follow_links.append(a.split("=", 1)[1])
                 continue
             if a.startswith("-"):
                 print(f"error: unknown update option: {a}", file=sys.stderr)
@@ -3550,6 +3562,14 @@ def dispatch_command(cmd: str) -> None:
             print(f"error: path not found: {watch_path}", file=sys.stderr)
             sys.exit(1)
         from graphify.watch import _rebuild_code
+
+        if update_follow_links:
+            # Persist like extract does, so _rebuild_code (and every later
+            # flag-less update) scans the same link folders.
+            from graphify.watch import _write_build_config
+            _write_build_config(
+                watch_path / _GRAPHIFY_OUT, excludes=None, follow_links=update_follow_links
+            )
 
         print(f"Updating code graph in {watch_path} (no LLM needed)...")
         # Interactive CLI: block on the per-repo lock rather than skip, so the
@@ -4407,7 +4427,7 @@ def dispatch_command(cmd: str) -> None:
             print(
                 "Usage: graphify extract <path> [--backend gemini|kimi|claude|openai|deepseek|ollama] "
                 "[--model M] [--mode deep] [--out DIR|--output DIR] [--google-workspace] [--no-cluster] "
-                "[--no-gitignore] [--code-only] [--no-dedup] "
+                "[--no-gitignore] [--follow-link PATH]... [--code-only] [--no-dedup] "
                 "[--max-workers N] [--token-budget N] [--max-concurrency N] "
                 "[--api-timeout S] [--postgres DSN] [--cargo] [--allow-partial] "
                 "[--allow-dedup-shrink] [--timing]",
@@ -4458,6 +4478,8 @@ def dispatch_command(cmd: str) -> None:
         cli_resolution: float = 1.0
         cli_exclude_hubs: float | None = None
         cli_excludes: list[str] = []
+        # --follow-link (fork-local, repeatable): in-root link folders to index.
+        cli_follow_links: list[str] = []
         cli_timing: bool = False
         # --force parity with `graphify update`: the flag or GRAPHIFY_FORCE=1
         # disables the incremental gate and skips semantic-cache reads (#1894).
@@ -4520,6 +4542,10 @@ def dispatch_command(cmd: str) -> None:
                 google_workspace = True; i += 1
             elif a == "--no-gitignore":
                 no_gitignore = True; i += 1
+            elif a == "--follow-link" and i + 1 < len(args):
+                cli_follow_links.append(args[i + 1]); i += 2
+            elif a.startswith("--follow-link="):
+                cli_follow_links.append(a.split("=", 1)[1]); i += 1
             elif a == "--global":
                 global_merge = True; i += 1
             elif a == "--as" and i + 1 < len(args):
@@ -4615,6 +4641,7 @@ def dispatch_command(cmd: str) -> None:
             _write_build_config as _write_build_cfg,
             _read_build_excludes as _read_build_ex,
             _read_build_gitignore as _read_build_gi,
+            _read_build_follow_links as _read_build_fl,
         )
         # #1971 persistence: an explicit --no-gitignore persists False; a later
         # flag-less `graphify extract` must NOT clobber it back to True, which
@@ -4626,11 +4653,13 @@ def dispatch_command(cmd: str) -> None:
         _effective_gitignore = False if no_gitignore else _read_build_gi(graphify_out)
         # An explicit list replaces the persisted one; omission reuses it.
         _effective_excludes = cli_excludes or _read_build_ex(graphify_out)
+        _effective_follow_links = cli_follow_links or _read_build_fl(graphify_out)
         _write_build_cfg(
             graphify_out,
             excludes=cli_excludes or None,
             gitignore=False if no_gitignore else None,
             code_only=True if code_only else None,
+            follow_links=cli_follow_links or None,
         )
 
         stages = _StageTimer(cli_timing)
@@ -4700,6 +4729,7 @@ def dispatch_command(cmd: str) -> None:
                 extra_excludes=_effective_excludes or None,
                 gitignore=_effective_gitignore,
                 cache_root=out_root,
+                follow_links=_effective_follow_links or None,
             )
             files_by_type = detection.get("files", {})
             new_by_type = detection.get("new_files", {})
@@ -4779,6 +4809,7 @@ def dispatch_command(cmd: str) -> None:
                 extra_excludes=_effective_excludes or None,
                 cache_root=out_root,
                 gitignore=_effective_gitignore,
+                follow_links=_effective_follow_links or None,
             )
             files_by_type = detection.get("files", {})
             code_files = [Path(p) for p in files_by_type.get("code", [])]

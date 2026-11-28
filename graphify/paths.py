@@ -544,6 +544,38 @@ def disambiguate_ambiguous_candidates(
 GRAPHIFY_OUT_NAME = os.path.basename(os.path.normpath(GRAPHIFY_OUT))
 
 
+# Fork-local --follow-link: detect() publishes the listed in-root link folders
+# (lexical, absolute) here. An environment variable rather than a module global
+# so spawned extraction workers, which call the cache key builders, see it too.
+FOLLOWED_LINKS_ENV = "GRAPHIFY_FOLLOWED_LINK_DIRS"
+
+
+def publish_followed_links(dirs: "list[Path]") -> None:
+    """Record the followed link folders for key builders in this process tree."""
+    os.environ[FOLLOWED_LINKS_ENV] = os.pathsep.join(str(d) for d in dirs)
+
+
+def followed_link_relpath(path: "str | Path", root: "str | Path") -> "Path | None":
+    """``path`` relative to ``root``, lexically, when it lies under a followed link.
+
+    Key builders resolve paths and relativize them to the resolved root; a file
+    under a followed link resolves OUTSIDE the root, so they would key it by its
+    target. This returns the in-root spelling (``Context/x.md``) instead, and
+    None for every path not under a published followed link.
+    """
+    raw = os.environ.get(FOLLOWED_LINKS_ENV)
+    if not raw:
+        return None
+    walked = Path(os.path.abspath(path))
+    for d in raw.split(os.pathsep):
+        if d and walked.is_relative_to(d):
+            try:
+                return walked.relative_to(os.path.abspath(root))
+            except ValueError:
+                return None
+    return None
+
+
 def out_path(*parts: str) -> Path:
     """A path inside the configured output dir, e.g. ``out_path("cache")``.
 
